@@ -14,6 +14,7 @@ ___________________  _________
 ## What's New in this branch 🎉
 
 **Implemented Breadth-First Search**
+
 This branch implements a Breadth-First Search algorithm using the initial list of channels provided by the user as a starting point.
 It explores new channels based on forwarded messages and Telegram links embedded in text messages.
 
