@@ -1,4 +1,5 @@
 import os
+import re
 import sqlite3
 import json
 import csv
@@ -11,8 +12,9 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Any
 from pathlib import Path
 from io import StringIO
-from telethon import TelegramClient
-from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, MessageMediaWebPage, User, PeerChannel
+from telethon import TelegramClient, errors
+from telethon.tl.types import MessageMediaPhoto, MessageMediaDocument, MessageMediaWebPage, User, PeerChannel, \
+    MessageEntityTextUrl
 from telethon.errors import FloodWaitError, SessionPasswordNeededError
 import qrcode
 
@@ -43,6 +45,8 @@ class MessageData:
     media_type: Optional[str]
     media_path: Optional[str]
     reply_to: Optional[int]
+    fwd_from: Optional[int]
+    links_to: Optional[str]
 
 class OptimizedTelegramScraper:
     def __init__(self):
@@ -86,7 +90,8 @@ class OptimizedTelegramScraper:
             conn.execute('''CREATE TABLE IF NOT EXISTS messages
                           (id INTEGER PRIMARY KEY, message_id INTEGER UNIQUE, date TEXT, 
                            sender_id INTEGER, first_name TEXT, last_name TEXT, username TEXT, 
-                           message TEXT, media_type TEXT, media_path TEXT, reply_to INTEGER)''')
+                           message TEXT, media_type TEXT, media_path TEXT, reply_to INTEGER,
+                           forward_from INTEGER, links_to TEXT)''')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_message_id ON messages(message_id)')
             conn.execute('CREATE INDEX IF NOT EXISTS idx_date ON messages(date)')
             conn.execute('PRAGMA journal_mode=WAL')
@@ -108,11 +113,11 @@ class OptimizedTelegramScraper:
         conn = self.get_db_connection(channel)
         data = [(msg.message_id, msg.date, msg.sender_id, msg.first_name, 
                 msg.last_name, msg.username, msg.message, msg.media_type, 
-                msg.media_path, msg.reply_to) for msg in messages]
+                msg.media_path, msg.reply_to, msg.fwd_from, msg.links_to) for msg in messages]
         
         conn.executemany('''INSERT OR IGNORE INTO messages 
                            (message_id, date, sender_id, first_name, last_name, username, 
-                            message, media_type, media_path, reply_to)
+                            message, media_type, media_path, reply_to, forward_from, links_to)
                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', data)
         conn.commit()
 
@@ -191,11 +196,19 @@ class OptimizedTelegramScraper:
             processed_messages = 0
             last_message_id = offset_id
             semaphore = asyncio.Semaphore(self.max_concurrent_downloads)
-
+            new_channels = []
+            links_to = []
             async for message in self.client.iter_messages(entity, offset_id=offset_id, reverse=True):
                 try:
                     sender = await message.get_sender()
-                    
+
+                    if message.entities:
+                        for entity in message.entities:
+                            if type(entity) is MessageEntityTextUrl and re.search(r"(https?:\/\/)?(www[.])?(telegram|t)\.me\/([a-zA-Z0-9_-]*)\/?$", entity.url):
+                                ch_id = entity.url.split('/')[-1]
+                                ch = await self.client.get_input_entity(ch_id)
+                                links_to.append(str(-(ch.channel_id + 1000000000000)))
+
                     msg_data = MessageData(
                         message_id=message.id,
                         date=message.date.strftime('%Y-%m-%d %H:%M:%S'),
@@ -206,9 +219,27 @@ class OptimizedTelegramScraper:
                         message=message.message or '',
                         media_type=message.media.__class__.__name__ if message.media else None,
                         media_path=None,
-                        reply_to=message.reply_to_msg_id if message.reply_to else None
+                        reply_to=message.reply_to_msg_id if message.reply_to else None,
+                        fwd_from=message.forward.from_id.channel_id if message.forward else None,
+                        links_to=json.dumps(links_to) if links_to else None,
                     )
-                    
+
+                    if msg_data.fwd_from:
+                        ch = await self.client.get_input_entity(msg_data.fwd_from)
+                        try:
+                            s = await self.client.get_me()
+                            await self.client.get_permissions(ch.channel_id, s.id)
+                        except errors.UserNotParticipantError:
+                            if str(-(ch.channel_id + 1000000000000)) not in self.state["channels"]:
+                                self.state["channels"][str(-(ch.channel_id + 1000000000000))] = 0
+                                new_channels.append(str(-(ch.channel_id + 1000000000000)))
+
+                    if links_to:
+                        for link in links_to:
+                            if link not in self.state["channels"]:
+                                self.state["channels"][link] = 0
+                                new_channels.append(link)
+
                     message_batch.append(msg_data)
 
                     if self.state['scrape_media'] and message.media and not isinstance(message.media, MessageMediaWebPage):
@@ -650,12 +681,22 @@ class OptimizedTelegramScraper:
         
         choice = input("\nEnter selection: ").strip()
         selected_channels = self.parse_channel_selection(choice)
-        
+        tot = len(selected_channels)
+
         if selected_channels:
             print(f"\n🚀 Starting scrape of {len(selected_channels)} channel(s)...")
+            new_channels = []
             for i, channel in enumerate(selected_channels, 1):
                 print(f"\n[{i}/{len(selected_channels)}] Scraping: {channel}")
-                await self.scrape_channel(channel, self.state['channels'][channel])
+                new_channels += await self.scrape_channel(channel, self.state['channels'][channel])
+                print(new_channels)
+            tot += len(new_channels)
+            while len(new_channels) > 0:
+                channel = new_channels.pop()
+                tmp = await self.scrape_channel(channel, self.state['channels'][channel])
+                if len(tmp) > 0:
+                    new_channels += tmp
+                    tot += len(tmp)
             print(f"\n✅ Completed scraping {len(selected_channels)} channel(s)!")
         else:
             print("❌ No valid channels selected")
@@ -673,6 +714,7 @@ class OptimizedTelegramScraper:
             print("[E] Export data")
             print("[T] Rescrape media")
             print("[F] Fix missing media")
+            print("[A] Translate ID to name")
             print("[Q] Quit")
             print("="*40)
 
@@ -712,6 +754,12 @@ class OptimizedTelegramScraper:
                         
                 elif choice == 's':
                     await self.scrape_specific_channels()
+
+                elif choice == 'a':
+                    input_id = input("Enter ID: ").strip()
+                    if int(input_id) < 0:
+                        input_id = int(input_id) * (-1) - 1000000000000
+                    print("With Id:", await self.client.get_entity(PeerChannel(input_id)))
                     
                 elif choice == 'm':
                     self.state['scrape_media'] = not self.state['scrape_media']
