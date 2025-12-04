@@ -118,7 +118,7 @@ class OptimizedTelegramScraper:
         conn.executemany('''INSERT OR IGNORE INTO messages 
                            (message_id, date, sender_id, first_name, last_name, username, 
                             message, media_type, media_path, reply_to, forward_from, links_to)
-                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', data)
+                           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)''', data)
         conn.commit()
 
     async def download_media(self, channel: str, message) -> Optional[str]:
@@ -310,6 +310,7 @@ class OptimizedTelegramScraper:
             self.state['channels'][channel] = last_message_id
             self.save_state()
             print(f"\nCompleted scraping channel {channel}")
+            return new_channels
 
         except Exception as e:
             print(f"Error with channel {channel}: {e}")
