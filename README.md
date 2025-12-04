@@ -1,4 +1,4 @@
-# Telegram Channel Scraper 📱
+# Explorative Telegram Channel Scraper 📱
 
 A powerful Python script that allows you to scrape messages and media from Telegram channels using the Telethon library. Features include real-time continuous scraping, media downloading, and data export capabilities.
 
@@ -10,6 +10,12 @@ ___________________  _________
   |____|  \______  /_______  /
                  \/        \/
 ```
+
+## What's New in this branch 🎉
+
+**Implemented Breadth-First Search**
+This branch implements a Breadth-First Search algorithm using the initial list of channels provided by the user as a starting point.
+It explores new channels based on forwarded messages and Telegram links embedded in text messages.
 
 ## What's New in v3.0 🎉
 
